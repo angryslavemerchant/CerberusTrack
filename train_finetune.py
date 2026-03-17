@@ -32,7 +32,7 @@ CFG = dict(
     num_workers    = 24,
     lr             = 1e-3,   # lower than frozen run; backbone gets lr × 0.1 = 1e-4
     val_split      = 0.05,
-    save_every     = 5,
+    save_every     = 1,
     save_dir       = "checkpoints",
     plot_every     = 20,
 
