@@ -268,16 +268,17 @@ def build_dataloader(
     labels_dir: str,
     batch_size: int  = 128,
     num_workers: int = 14,
+    shuffle: bool    = True,
     **dataset_kwargs,
 ) -> DataLoader:
     dataset = COCOSiameseDataset(images_dir, labels_dir, **dataset_kwargs)
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
-        drop_last=True,
+        drop_last=shuffle,   # only drop last for training
     )
