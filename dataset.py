@@ -56,11 +56,11 @@ def _make_canvas(s_int: int) -> np.ndarray:
 
 
 def _crop_and_resize(img_np: np.ndarray, cx: float, cy: float,
-                     s: float, out_size: int) -> Image.Image:
+                     s: float, out_size: int) -> np.ndarray:
     """
     Crop a square of side s centred at (cx, cy) from img_np (H×W×3 uint8).
     Regions outside the image boundary are filled with ImageNet mean colour.
-    Returns a PIL Image resized to out_size×out_size.
+    Returns a numpy array resized to out_size×out_size.
     """
     H, W = img_np.shape[:2]
     s_int = max(1, int(round(s)))
