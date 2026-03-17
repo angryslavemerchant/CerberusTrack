@@ -9,7 +9,6 @@ import random
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import kornia.augmentation as KA
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -18,43 +17,7 @@ from livelossplot import PlotLosses
 
 from Cerberus_Siamese import CerberusSiamese
 from torch.utils.data import DataLoader
-from dataset import COCOSiameseDataset
-
-
-# ---------------------------------------------------------------------------
-# Loss helpers
-# ---------------------------------------------------------------------------
-def weighted_bce_loss(logits, targets):
-    """BCE with per-pixel floor weighting + fg/bg split for logging."""
-    weight = targets.clamp(min=0.1)
-    bce    = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-    loss   = (bce * weight).mean()
-
-    fg_mask = targets > 0.1
-    fg_loss = bce[fg_mask].mean()   if fg_mask.any()   else bce.new_zeros(())
-    bg_loss = bce[~fg_mask].mean()  if (~fg_mask).any() else bce.new_zeros(())
-    return loss, fg_loss, bg_loss
-
-
-def soft_argmax_2d(heatmap):
-    """Differentiable peak coordinate estimator. Input: (b, 1, H, W) logits.
-    Returns normalised (x, y) coordinates in [0, 1] — shape (b, 2).
-    """
-    b, _, H, W = heatmap.shape
-    weights = torch.softmax(heatmap.view(b, -1), dim=-1).view(b, H, W)
-    ys = torch.linspace(0, 1, H, device=heatmap.device)
-    xs = torch.linspace(0, 1, W, device=heatmap.device)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-    pred_y = (weights * grid_y).sum(dim=(-2, -1))
-    pred_x = (weights * grid_x).sum(dim=(-2, -1))
-    return torch.stack([pred_x, pred_y], dim=-1)  # (b, 2)
-
-
-# ---------------------------------------------------------------------------
-# ImageNet normalisation constants (used for GPU batch normalisation)
-# ---------------------------------------------------------------------------
-_NORM_MEAN = torch.tensor([0.485, 0.456, 0.406])
-_NORM_STD  = torch.tensor([0.229, 0.224, 0.225])
+from simpleDataset import COCOSiameseDataset
 
 
 # ---------------------------------------------------------------------------
@@ -93,20 +56,11 @@ def build_augmentations(device):
     aug_search = KA.AugmentationSequential(
         KA.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05, p=0.8),
         KA.RandomGrayscale(p=0.1),
-        KA.RandomGaussianBlur(kernel_size=(7, 7), sigma=(0.5, 5.0), p=0.5),
-        KA.RandomMotionBlur(kernel_size=(7, 21), angle=(-45, 45), direction=(-1.0, 1.0), p=0.4),
+        KA.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.3),
         same_on_batch=False,
     ).to(device)
 
-    # Spatial warps applied jointly to search image + heatmap_gt so they stay aligned.
-    aug_spatial = KA.AugmentationSequential(
-        KA.RandomPerspective(distortion_scale=0.3, p=0.4),
-        KA.RandomAffine(degrees=10, translate=(0.08, 0.08), scale=(0.85, 1.15), shear=5, p=0.4),
-        same_on_batch=False,
-        data_keys=["input", "mask"],
-    ).to(device)
-
-    return aug_template, aug_search, aug_spatial
+    return aug_template, aug_search
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +108,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=2,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -164,11 +118,12 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=2,
         drop_last=False,
     )
 
-    # ---- loss (weighted_bce_loss + soft_argmax coord loss) -----------------
+    # ---- loss --------------------------------------------------------------
+    criterion = nn.BCEWithLogitsLoss()
 
     # ---- optimiser ---------------------------------------------------------
     if cfg["freeze_backbone"]:
@@ -188,11 +143,7 @@ def train(cfg):
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg["epochs"], eta_min=cfg["lr"] * 0.01)
     scaler    = torch.amp.GradScaler(enabled=cfg["amp"])
 
-    aug_template, aug_search, aug_spatial = build_augmentations(device)
-
-    # Pre-build normalisation tensors on device
-    norm_mean = _NORM_MEAN.to(device).view(1, 3, 1, 1)
-    norm_std  = _NORM_STD.to(device).view(1, 3, 1, 1)
+    aug_template, aug_search = build_augmentations(device)
 
     start_epoch = 0
 
@@ -215,10 +166,7 @@ def train(cfg):
     os.makedirs(cfg["save_dir"], exist_ok=True)
 
     # ---- livelossplot ------------------------------------------------------
-    plotlosses = PlotLosses(groups={
-        "loss":       ["loss", "val_loss"],
-        "components": ["fg_loss", "bg_loss"],
-    })
+    plotlosses = PlotLosses(groups={"loss": ["loss", "val_loss"]})
     last_val_loss = 0.0
 
     # ---- loop --------------------------------------------------------------
@@ -231,40 +179,21 @@ def train(cfg):
         running_loss = 0.0
 
         train_bar = tqdm(train_loader, desc=f"Train {epoch+1}", leave=False)
-        window_loss    = 0.0
-        window_fg_loss = 0.0
-        window_bg_loss = 0.0
-        for i, (template, search, heatmap_gt, gt_coords) in enumerate(train_bar):
-            template   = template.to(device, non_blocking=True).float().div(255)
-            search     = search.to(device, non_blocking=True).float().div(255)
+        window_loss = 0.0
+        for i, (template, search, heatmap_gt) in enumerate(train_bar):
+            template   = template.to(device, non_blocking=True)
+            search     = search.to(device, non_blocking=True)
             heatmap_gt = heatmap_gt.to(device, non_blocking=True)
-            gt_coords  = gt_coords.to(device, non_blocking=True)
-
-            template = (template - norm_mean) / norm_std
-            search   = (search   - norm_mean) / norm_std
 
             with torch.no_grad():
                 template = aug_template(template)
                 search   = aug_search(search)
-                hm_size = heatmap_gt.shape[-1]
-                hm_up = F.interpolate(heatmap_gt, size=search.shape[-2:], mode="bilinear", align_corners=False)
-                search, hm_up = aug_spatial(search, hm_up)
-                heatmap_gt = F.interpolate(hm_up, size=(hm_size, hm_size), mode="bilinear", align_corners=False)
-
-            is_pos    = heatmap_gt.amax(dim=(-1, -2, -3)) > 0   # (b,) bool
-            gt_coords = soft_argmax_2d(heatmap_gt)               # recompute after warp
 
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast(device_type=device.type, enabled=cfg["amp"]):
                 pred = model(template, search)
-                bce_loss, fg_l, bg_l = weighted_bce_loss(pred, heatmap_gt)
-                if is_pos.any():
-                    pred_coords = soft_argmax_2d(pred)
-                    coord_loss  = F.l1_loss(pred_coords[is_pos], gt_coords[is_pos])
-                else:
-                    coord_loss = pred.new_zeros(())
-                loss = bce_loss + 0.1 * coord_loss
+                loss = criterion(pred, heatmap_gt)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -272,23 +201,14 @@ def train(cfg):
             scaler.step(optimizer)
             scaler.update()
 
-            running_loss   += loss.item()
-            window_loss    += loss.item()
-            window_fg_loss += fg_l.item()
-            window_bg_loss += bg_l.item()
+            running_loss += loss.item()
+            window_loss  += loss.item()
             train_bar.set_postfix(loss=f"{running_loss / (i + 1):.4f}")
 
             if (i + 1) % cfg["plot_every"] == 0:
-                plotlosses.update({
-                    "loss":     window_loss    / cfg["plot_every"],
-                    "val_loss": last_val_loss,
-                    "fg_loss":  window_fg_loss / cfg["plot_every"],
-                    "bg_loss":  window_bg_loss / cfg["plot_every"],
-                })
+                plotlosses.update({"loss": window_loss / cfg["plot_every"], "val_loss": last_val_loss})
                 plotlosses.send()
-                window_loss    = 0.0
-                window_fg_loss = 0.0
-                window_bg_loss = 0.0
+                window_loss = 0.0
 
         avg_train_loss = running_loss / len(train_loader)
 
@@ -298,18 +218,14 @@ def train(cfg):
 
         with torch.no_grad():
             val_bar = tqdm(val_loader, desc=f"Val   {epoch+1}", leave=False)
-            for template, search, heatmap_gt, _ in val_bar:
-                template   = template.to(device, non_blocking=True).float().div(255)
-                search     = search.to(device, non_blocking=True).float().div(255)
+            for template, search, heatmap_gt in val_bar:
+                template   = template.to(device, non_blocking=True)
+                search     = search.to(device, non_blocking=True)
                 heatmap_gt = heatmap_gt.to(device, non_blocking=True)
-
-                template = (template - norm_mean) / norm_std
-                search   = (search   - norm_mean) / norm_std
 
                 with torch.amp.autocast(device_type=device.type, enabled=cfg["amp"]):
                     pred = model(template, search)
-                    bce_l, _, _ = weighted_bce_loss(pred, heatmap_gt)
-                    val_loss += bce_l.item()
+                    val_loss += criterion(pred, heatmap_gt).item()
 
         avg_val_loss = val_loss / len(val_loader)
 
@@ -319,15 +235,8 @@ def train(cfg):
         last_val_loss = avg_val_loss
         epoch_bar.set_postfix(train=f"{avg_train_loss:.4f}", val=f"{avg_val_loss:.4f}")
         leftover = len(train_loader) % cfg["plot_every"]
-        step_loss    = (window_loss    / leftover) if leftover else avg_train_loss
-        step_fg_loss = (window_fg_loss / leftover) if leftover else 0.0
-        step_bg_loss = (window_bg_loss / leftover) if leftover else 0.0
-        plotlosses.update({
-            "loss":     step_loss,
-            "val_loss": last_val_loss,
-            "fg_loss":  step_fg_loss,
-            "bg_loss":  step_bg_loss,
-        })
+        step_loss = (window_loss / leftover) if leftover else avg_train_loss
+        plotlosses.update({"loss": step_loss, "val_loss": last_val_loss})
         plotlosses.send()
 
         # -- checkpoint ------------------------------------------------------
