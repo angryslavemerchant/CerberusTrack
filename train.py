@@ -3,11 +3,14 @@ Training script for CerberusSiamese.
 Run via %run train.py from a Jupyter notebook.
 """
 
+import math
 import os
 import random
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.io
 import kornia.augmentation as KA
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -16,7 +19,7 @@ from livelossplot import PlotLosses
 
 from Cerberus_Siamese import CerberusSiamese
 from torch.utils.data import DataLoader
-from dataset import COCOSiameseDataset
+from dataset import COCOSiameseDataset, siamese_collate_fn
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +45,110 @@ CFG = dict(
     amp             = True,
     compile         = True,
 )
+
+
+# ---------------------------------------------------------------------------
+# GPU crop/resize  (runs in the main GPU thread, not in DataLoader workers)
+# ---------------------------------------------------------------------------
+_MEAN_UINT8 = (
+    int(round(0.485 * 255)),   # R
+    int(round(0.456 * 255)),   # G
+    int(round(0.406 * 255)),   # B
+)
+_NORM_MEAN = torch.tensor([0.485, 0.456, 0.406])
+_NORM_STD  = torch.tensor([0.229, 0.224, 0.225])
+
+
+def gpu_crop_and_resize(
+    img_chw: torch.Tensor,   # (3, H, W) uint8, GPU, RGB  (torchvision decode = RGB)
+    cx: float, cy: float, s: float,
+    img_H: int, img_W: int,
+    out_size: int,
+) -> torch.Tensor:
+    """
+    GPU equivalent of the old _crop_and_resize + _make_canvas.
+    Boundary regions outside the image are filled with ImageNet mean colour.
+    Returns (3, out_size, out_size) float32 in [0, 1].
+    """
+    s_int = max(1, int(round(s)))
+    half  = s_int / 2.0
+
+    x1 = int(math.floor(cx - half))
+    y1 = int(math.floor(cy - half))
+    x2 = x1 + s_int
+    y2 = y1 + s_int
+
+    src_x1 = max(0, x1);  src_y1 = max(0, y1)
+    src_x2 = min(img_W, x2);  src_y2 = min(img_H, y2)
+
+    dst_x1 = src_x1 - x1
+    dst_y1 = src_y1 - y1
+
+    # Canvas filled with ImageNet mean (uint8, on the same device as img)
+    canvas = torch.empty((3, s_int, s_int), dtype=torch.uint8, device=img_chw.device)
+    canvas[0].fill_(_MEAN_UINT8[0])
+    canvas[1].fill_(_MEAN_UINT8[1])
+    canvas[2].fill_(_MEAN_UINT8[2])
+
+    if src_x2 > src_x1 and src_y2 > src_y1:
+        h_src = src_y2 - src_y1
+        w_src = src_x2 - src_x1
+        canvas[:, dst_y1:dst_y1 + h_src, dst_x1:dst_x1 + w_src] = \
+            img_chw[:, src_y1:src_y2, src_x1:src_x2]
+
+    # Convert to float and resize
+    canvas_f = canvas.float().div(255.0).unsqueeze(0)   # (1, 3, s_int, s_int)
+    out = F.interpolate(canvas_f, size=(out_size, out_size),
+                        mode="bilinear", align_corners=False)
+    return out.squeeze(0)   # (3, out_size, out_size) float32 [0,1]
+
+
+def prepare_batch(batch: dict, device: torch.device,
+                  template_size: int = 128, search_size: int = 256):
+    """
+    GPU-decode, crop, resize, and normalise a collated batch from siamese_collate_fn.
+    Returns (template, search, heatmap_gt) ready for the model — same dtypes/shapes
+    as the old pipeline.
+
+    Requires torchvision >= 0.13 for decode_jpeg(..., device=device) (nvJPEG).
+    If your torchvision is older, change to:
+        torchvision.io.decode_jpeg(b).to(device)
+    """
+    B = len(batch["tmpl_bytes"])
+    tmpl_crops = []
+    srch_crops = []
+
+    for i in range(B):
+        # decode_jpeg expects a 1-D uint8 CPU tensor; device= puts output on GPU
+        t_img = torchvision.io.decode_jpeg(batch["tmpl_bytes"][i], device=device)
+        tmpl_crops.append(gpu_crop_and_resize(
+            t_img,
+            batch["tmpl_cx"][i].item(), batch["tmpl_cy"][i].item(),
+            batch["tmpl_s"][i].item(),
+            batch["tmpl_H"][i].item(),  batch["tmpl_W"][i].item(),
+            template_size,
+        ))
+
+        s_img = torchvision.io.decode_jpeg(batch["srch_bytes"][i], device=device)
+        srch_crops.append(gpu_crop_and_resize(
+            s_img,
+            batch["srch_cx"][i].item(), batch["srch_cy"][i].item(),
+            batch["srch_s"][i].item(),
+            batch["srch_H"][i].item(),  batch["srch_W"][i].item(),
+            search_size,
+        ))
+
+    template   = torch.stack(tmpl_crops)   # (B, 3, 128, 128) float32
+    search     = torch.stack(srch_crops)   # (B, 3, 256, 256) float32
+    heatmap_gt = batch["heatmap"].to(device, non_blocking=True)   # (B, 1, 16, 16)
+
+    # Batch normalise — replaces transforms.Normalize that was in _to_tensor
+    mean = _NORM_MEAN.to(device).view(1, 3, 1, 1)
+    std  = _NORM_STD.to(device).view(1, 3, 1, 1)
+    template = (template - mean) / std
+    search   = (search   - mean) / std
+
+    return template, search, heatmap_gt
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +206,7 @@ def train(cfg):
     val_ds = COCOSiameseDataset(
         _img_bytes=full_ds.img_bytes,
         _instances=val_instances,
+        _img_dims=full_ds.img_dims,
         neg_ratio=0.0,   # positives only so val loss is comparable across epochs
     )
 
@@ -109,8 +217,9 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         drop_last=True,
+        collate_fn=siamese_collate_fn,
     )
     val_loader = DataLoader(
         val_ds,
@@ -119,8 +228,9 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         drop_last=False,
+        collate_fn=siamese_collate_fn,
     )
 
     # ---- loss --------------------------------------------------------------
@@ -181,10 +291,10 @@ def train(cfg):
 
         train_bar = tqdm(train_loader, desc=f"Train {epoch+1}", leave=False)
         window_loss = 0.0
-        for i, (template, search, heatmap_gt) in enumerate(train_bar):
-            template   = template.to(device, non_blocking=True)
-            search     = search.to(device, non_blocking=True)
-            heatmap_gt = heatmap_gt.to(device, non_blocking=True)
+        for i, batch in enumerate(train_bar):
+            template, search, heatmap_gt = prepare_batch(
+                batch, device, cfg["batch_size"],
+            )
 
             with torch.no_grad():
                 template = aug_template(template)
@@ -219,10 +329,10 @@ def train(cfg):
 
         with torch.no_grad():
             val_bar = tqdm(val_loader, desc=f"Val   {epoch+1}", leave=False)
-            for template, search, heatmap_gt in val_bar:
-                template   = template.to(device, non_blocking=True)
-                search     = search.to(device, non_blocking=True)
-                heatmap_gt = heatmap_gt.to(device, non_blocking=True)
+            for batch in val_bar:
+                template, search, heatmap_gt = prepare_batch(
+                    batch, device, cfg["batch_size"],
+                )
 
                 with torch.amp.autocast(device_type=device.type, enabled=cfg["amp"]):
                     pred = model(template, search)
