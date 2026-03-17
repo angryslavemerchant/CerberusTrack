@@ -109,7 +109,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=8,
+        prefetch_factor=2,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -119,7 +119,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=8,
+        prefetch_factor=2,
         drop_last=False,
     )
 
