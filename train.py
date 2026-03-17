@@ -21,10 +21,10 @@ from dataset import build_dataloader
 # Config — edit here
 # ---------------------------------------------------------------------------
 CFG = dict(
-    images_dir     = "data/coco/coco/images/train2017",
-    labels_dir     = "data/coco/coco/labels/train2017",
-    val_images_dir = "data/coco/coco/images/val2017",
-    val_labels_dir = "data/coco/coco/labels/val2017",
+    images_dir     = "/workspace/data/coco/coco/images/train2017",
+    labels_dir     = "/workspace/data/coco/coco/labels/train2017",
+    val_images_dir = "/workspace/data/coco/coco/images/val2017",
+    val_labels_dir = "/workspace/data/coco/coco/labels/val2017",
 
     epochs         = 50,
     batch_size     = 128,
