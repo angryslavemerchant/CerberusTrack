@@ -74,7 +74,7 @@ CFG = dict(
     plot_every     = 20,
 
     freeze_backbone = False,
-    resume          = "checkpoints/cerberus_epoch20.pth",   # ← update as needed
+    resume          = "checkpoints/cerberus_epoch11.pth",   # ← update as needed
     amp             = True,
     compile         = True,
 )
