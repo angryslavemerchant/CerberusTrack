@@ -27,9 +27,9 @@ CFG = dict(
     val_labels_dir = "/workspace/data/coco/labels/val2017",
 
     epochs         = 50,
-    batch_size     = 128,
-    num_workers    = 14,
-    lr             = 1e-3,
+    batch_size     = 512,
+    num_workers    = 24,
+    lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
     save_every     = 5,
     save_dir       = "checkpoints",
     plot_every     = 200,   # update livelossplot every N steps
@@ -37,7 +37,7 @@ CFG = dict(
     freeze_backbone = True,    # set False to unfreeze on next run
     resume          = None,    # e.g. "checkpoints/cerberus_epoch50.pth"
     amp             = True,
-    compile         = False,
+    compile         = True,
 )
 
 
@@ -147,6 +147,7 @@ def train(cfg):
 
     # ---- livelossplot ------------------------------------------------------
     plotlosses = PlotLosses(groups={"loss": ["loss", "val_loss"]})
+    last_val_loss = 0.0
 
     # ---- loop --------------------------------------------------------------
     epoch_bar = tqdm(range(start_epoch, cfg["epochs"]), desc="Epochs")
@@ -185,7 +186,7 @@ def train(cfg):
             train_bar.set_postfix(loss=f"{running_loss / (i + 1):.4f}")
 
             if (i + 1) % cfg["plot_every"] == 0:
-                plotlosses.update({"loss": window_loss / cfg["plot_every"]})
+                plotlosses.update({"loss": window_loss / cfg["plot_every"], "val_loss": last_val_loss})
                 plotlosses.send()
                 window_loss = 0.0
 
@@ -211,10 +212,11 @@ def train(cfg):
         scheduler.step()
 
         # -- logging ---------------------------------------------------------
+        last_val_loss = avg_val_loss
         epoch_bar.set_postfix(train=f"{avg_train_loss:.4f}", val=f"{avg_val_loss:.4f}")
         leftover = len(train_loader) % cfg["plot_every"]
         step_loss = (window_loss / leftover) if leftover else avg_train_loss
-        plotlosses.update({"loss": step_loss, "val_loss": avg_val_loss})
+        plotlosses.update({"loss": step_loss, "val_loss": last_val_loss})
         plotlosses.send()
 
         # -- checkpoint ------------------------------------------------------
