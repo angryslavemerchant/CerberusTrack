@@ -3,6 +3,6 @@ tqdm~=4.67.3
 livelossplot~=0.5.6
 numpy~=2.4.2
 pillow~=12.1.1
-torchvision~=0.25.0+cu130
+torchvision~=0.25.0
 livelossplot
 kornia
