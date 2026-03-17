@@ -29,7 +29,7 @@ CFG = dict(
     val_labels_dir = "/workspace/data/coco/labels/val2017",
 
     epochs         = 50,
-    batch_size     = 1024,
+    batch_size     = 512,
     num_workers    = 24,
     lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
     val_split      = 0.05,   # fraction of train instances held out for val
