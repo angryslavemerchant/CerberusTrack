@@ -21,6 +21,13 @@ from dataset import COCOSiameseDataset
 
 
 # ---------------------------------------------------------------------------
+# ImageNet normalisation constants (used for GPU batch normalisation)
+# ---------------------------------------------------------------------------
+_NORM_MEAN = torch.tensor([0.485, 0.456, 0.406])
+_NORM_STD  = torch.tensor([0.229, 0.224, 0.225])
+
+
+# ---------------------------------------------------------------------------
 # Config — edit here
 # ---------------------------------------------------------------------------
 CFG = dict(
@@ -37,7 +44,7 @@ CFG = dict(
     plot_every     = 20,
 
     freeze_backbone = False,
-    resume          = "checkpoints/cerberus_epoch5.pth",   # ← update as needed
+    resume          = "checkpoints/cerberus_epoch20.pth",   # ← update as needed
     amp             = True,
     compile         = True,
 )
@@ -108,7 +115,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -118,7 +125,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         drop_last=False,
     )
 
@@ -144,6 +151,10 @@ def train(cfg):
     scaler    = torch.amp.GradScaler(enabled=cfg["amp"])
 
     aug_template, aug_search = build_augmentations(device)
+
+    # Pre-build normalisation tensors on device
+    norm_mean = _NORM_MEAN.to(device).view(1, 3, 1, 1)
+    norm_std  = _NORM_STD.to(device).view(1, 3, 1, 1)
 
     start_epoch = 0
 
@@ -181,9 +192,12 @@ def train(cfg):
         train_bar = tqdm(train_loader, desc=f"Train {epoch+1}", leave=False)
         window_loss = 0.0
         for i, (template, search, heatmap_gt) in enumerate(train_bar):
-            template   = template.to(device, non_blocking=True)
-            search     = search.to(device, non_blocking=True)
+            template   = template.to(device, non_blocking=True).float().div(255)
+            search     = search.to(device, non_blocking=True).float().div(255)
             heatmap_gt = heatmap_gt.to(device, non_blocking=True)
+
+            template = (template - norm_mean) / norm_std
+            search   = (search   - norm_mean) / norm_std
 
             with torch.no_grad():
                 template = aug_template(template)
@@ -219,9 +233,12 @@ def train(cfg):
         with torch.no_grad():
             val_bar = tqdm(val_loader, desc=f"Val   {epoch+1}", leave=False)
             for template, search, heatmap_gt in val_bar:
-                template   = template.to(device, non_blocking=True)
-                search     = search.to(device, non_blocking=True)
+                template   = template.to(device, non_blocking=True).float().div(255)
+                search     = search.to(device, non_blocking=True).float().div(255)
                 heatmap_gt = heatmap_gt.to(device, non_blocking=True)
+
+                template = (template - norm_mean) / norm_std
+                search   = (search   - norm_mean) / norm_std
 
                 with torch.amp.autocast(device_type=device.type, enabled=cfg["amp"]):
                     pred = model(template, search)

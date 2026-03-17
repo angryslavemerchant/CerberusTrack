@@ -12,7 +12,7 @@ Crop convention
   Search   : 256x256  —  2x template scale, center randomly jittered
   Heatmap  : 16x16    —  Gaussian blob at the object's projected location
 
-NOTE: Workers decode with TurboJPEG and return uint8 tensors (no normalisation).
+NOTE: Workers decode with cv2 and return uint8 tensors (no normalisation).
       Float conversion and ImageNet normalisation happen as a single batched GPU
       op in the training loop.  Kornia augmentations follow after that.
 """
@@ -24,7 +24,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-import turbojpeg as _tj
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -35,19 +34,6 @@ _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 
 CONTEXT_AMOUNT = 0.5   # SiamFC context padding factor
 SEARCH_SCALE   = 2.0   # search crop covers 2x the template area in image space
-
-
-# ---------------------------------------------------------------------------
-# TurboJPEG — one handle per process, created lazily so forked workers each
-# get their own independent instance.
-# ---------------------------------------------------------------------------
-_tj_handle: "_tj.TurboJPEG | None" = None
-
-def _get_tj() -> "_tj.TurboJPEG":
-    global _tj_handle
-    if _tj_handle is None:
-        _tj_handle = _tj.TurboJPEG()
-    return _tj_handle
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +213,10 @@ class COCOSiameseDataset(Dataset):
         inst = self.instances[idx]
         cx, cy, w, h = inst["cx"], inst["cy"], inst["w"], inst["h"]
 
-        tj = _get_tj()
-        img_np = tj.decode(self.img_bytes[inst["img_name"]], pixel_format=_tj.TJPF_RGB)
+        img_np = cv2.cvtColor(
+            cv2.imdecode(np.frombuffer(self.img_bytes[inst["img_name"]], np.uint8), cv2.IMREAD_COLOR),
+            cv2.COLOR_BGR2RGB,
+        )
 
         # ---- template crop (always from the target instance) -----------
         s_z, s_x = self._get_crop_size(w, h)
@@ -240,7 +228,10 @@ class COCOSiameseDataset(Dataset):
             while neg["img_name"] == inst["img_name"]:
                 neg = self.instances[random.randrange(len(self.instances))]
 
-            neg_img_np  = tj.decode(self.img_bytes[neg["img_name"]], pixel_format=_tj.TJPF_RGB)
+            neg_img_np  = cv2.cvtColor(
+                cv2.imdecode(np.frombuffer(self.img_bytes[neg["img_name"]], np.uint8), cv2.IMREAD_COLOR),
+                cv2.COLOR_BGR2RGB,
+            )
             _, neg_s_x  = self._get_crop_size(neg["w"], neg["h"])
             search      = _crop_and_resize(neg_img_np,
                                            neg["cx"], neg["cy"],
