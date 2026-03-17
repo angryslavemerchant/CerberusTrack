@@ -25,11 +25,11 @@ from dataset import COCOSiameseDataset
 # ---------------------------------------------------------------------------
 CFG = dict(
     images_dir     = "/workspace/data/coco/images/train2017",
-    labels_dir     = "/workspace/data/coco/coco/train2017",
+    labels_dir     = "/workspace/data/coco/labels/train2017",
 
     epochs         = 50,
     batch_size     = 512,
-    num_workers    = 24,
+    num_workers    = 12,
     lr             = 1e-3,   # lower than frozen run; backbone gets lr × 0.1 = 1e-4
     val_split      = 0.05,
     save_every     = 1,

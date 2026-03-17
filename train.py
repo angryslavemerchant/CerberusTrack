@@ -24,13 +24,13 @@ from dataset import COCOSiameseDataset
 # ---------------------------------------------------------------------------
 CFG = dict(
     images_dir     = "/workspace/data/coco/images/train2017",
-    labels_dir     = "/workspace/data/coco/coco/train2017",
+    labels_dir     = "/workspace/data/coco/labels/train2017",
     val_images_dir = "/workspace/data/coco/images/val2017",
     val_labels_dir = "/workspace/data/coco/labels/val2017",
 
     epochs         = 50,
     batch_size     = 512,
-    num_workers    = 24,
+    num_workers    = 12,
     lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
     val_split      = 0.05,   # fraction of train instances held out for val
     save_every     = 1,
