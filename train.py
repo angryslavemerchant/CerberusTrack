@@ -4,6 +4,7 @@ Run via %run train.py from a Jupyter notebook.
 """
 
 import os
+import random
 
 import torch
 import torch.nn as nn
@@ -14,7 +15,8 @@ from tqdm.auto import tqdm
 from livelossplot import PlotLosses
 
 from Cerberus_Siamese import CerberusSiamese
-from dataset import build_dataloader
+from torch.utils.data import DataLoader
+from dataset import COCOSiameseDataset
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +32,7 @@ CFG = dict(
     batch_size     = 1024,
     num_workers    = 24,
     lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
+    val_split      = 0.05,   # fraction of train instances held out for val
     save_every     = 5,
     save_dir       = "checkpoints",
     plot_every     = 20,   # update livelossplot every N steps
@@ -83,23 +86,41 @@ def train(cfg):
         print("torch.compile enabled")
 
     # ---- data --------------------------------------------------------------
-    print("Building train dataloader …")
-    train_loader = build_dataloader(
-        cfg["images_dir"],
-        cfg["labels_dir"],
-        batch_size=cfg["batch_size"],
-        num_workers=cfg["num_workers"],
-        shuffle=True,
+    print("Loading dataset …")
+    full_ds = COCOSiameseDataset(cfg["images_dir"], cfg["labels_dir"])
+
+    random.shuffle(full_ds.instances)
+    n_val = int(len(full_ds.instances) * cfg["val_split"])
+    val_instances   = full_ds.instances[:n_val]
+    full_ds.instances = full_ds.instances[n_val:]
+
+    print(f"Split → train: {len(full_ds.instances):,}  val: {len(val_instances):,}")
+
+    val_ds = COCOSiameseDataset(
+        _img_bytes=full_ds.img_bytes,
+        _instances=val_instances,
+        neg_ratio=0.0,   # positives only so val loss is comparable across epochs
     )
 
-    print("Building val dataloader …")
-    val_loader = build_dataloader(
-        cfg["val_images_dir"],
-        cfg["val_labels_dir"],
+    train_loader = DataLoader(
+        full_ds,
         batch_size=cfg["batch_size"],
+        shuffle=True,
         num_workers=cfg["num_workers"],
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=8,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=cfg["batch_size"],
         shuffle=False,
-        neg_ratio=0.0,   # val: positives only so loss is comparable across epochs
+        num_workers=cfg["num_workers"],
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=8,
+        drop_last=False,
     )
 
     # ---- loss --------------------------------------------------------------

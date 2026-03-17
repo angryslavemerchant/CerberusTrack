@@ -117,8 +117,8 @@ class COCOSiameseDataset(Dataset):
 
     def __init__(
         self,
-        images_dir: str,
-        labels_dir: str,
+        images_dir: str = "",
+        labels_dir: str = "",
         template_size: int = 128,
         search_size: int   = 256,
         heatmap_size: int  = 16,
@@ -127,6 +127,8 @@ class COCOSiameseDataset(Dataset):
         max_jitter: float  = 0.25,
         neg_ratio: float   = 0.25,
         min_area: int      = 400,
+        _img_bytes: dict   = None,
+        _instances: list   = None,
     ):
         self.template_size = template_size
         self.search_size   = search_size
@@ -135,6 +137,14 @@ class COCOSiameseDataset(Dataset):
         self.min_sigma     = min_sigma
         self.max_jitter    = max_jitter
         self.neg_ratio     = neg_ratio
+
+        # Prebuilt path: reuse already-loaded data (e.g. for val split)
+        if _img_bytes is not None and _instances is not None:
+            self.img_bytes = _img_bytes
+            self.instances = _instances
+            print(f"Dataset ready: {len(self.instances):,} instances "
+                  f"from {len(self.img_bytes):,} images")
+            return
 
         images_dir = Path(images_dir)
         labels_dir = Path(labels_dir)
