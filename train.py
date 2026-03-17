@@ -32,6 +32,7 @@ CFG = dict(
     lr             = 1e-3,
     save_every     = 5,
     save_dir       = "checkpoints",
+    plot_every     = 200,   # update livelossplot every N steps
 
     freeze_backbone = True,    # set False to unfreeze on next run
     resume          = None,    # e.g. "checkpoints/cerberus_epoch50.pth"
@@ -157,6 +158,7 @@ def train(cfg):
         running_loss = 0.0
 
         train_bar = tqdm(train_loader, desc=f"Train {epoch+1}", leave=False)
+        window_loss = 0.0
         for i, (template, search, heatmap_gt) in enumerate(train_bar):
             template   = template.to(device, non_blocking=True)
             search     = search.to(device, non_blocking=True)
@@ -179,7 +181,13 @@ def train(cfg):
             scaler.update()
 
             running_loss += loss.item()
+            window_loss  += loss.item()
             train_bar.set_postfix(loss=f"{running_loss / (i + 1):.4f}")
+
+            if (i + 1) % cfg["plot_every"] == 0:
+                plotlosses.update({"loss": window_loss / cfg["plot_every"]})
+                plotlosses.send()
+                window_loss = 0.0
 
         avg_train_loss = running_loss / len(train_loader)
 
@@ -204,7 +212,9 @@ def train(cfg):
 
         # -- logging ---------------------------------------------------------
         epoch_bar.set_postfix(train=f"{avg_train_loss:.4f}", val=f"{avg_val_loss:.4f}")
-        plotlosses.update({"loss": avg_train_loss, "val_loss": avg_val_loss})
+        leftover = len(train_loader) % cfg["plot_every"]
+        step_loss = (window_loss / leftover) if leftover else avg_train_loss
+        plotlosses.update({"loss": step_loss, "val_loss": avg_val_loss})
         plotlosses.send()
 
         # -- checkpoint ------------------------------------------------------

@@ -16,15 +16,13 @@ NOTE: Kornia augmentations (color jitter, blur, etc.) are applied in the
 training loop after the batch is moved to GPU, not here.
 """
 
-import io
 import math
-import os
 import random
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
@@ -84,7 +82,7 @@ def _crop_and_resize(img_np: np.ndarray, cx: float, cy: float,
     canvas = _make_canvas(s_int)
     canvas[dst_y1:dst_y2, dst_x1:dst_x2] = img_np[src_y1:src_y2, src_x1:src_x2]
 
-    return Image.fromarray(canvas).resize((out_size, out_size), Image.BILINEAR)
+    return cv2.resize(canvas, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
 
 
 def _make_gaussian(cx: float, cy: float, size: int, sigma: float) -> np.ndarray:
@@ -169,9 +167,9 @@ class COCOSiameseDataset(Dataset):
             with open(img_path, "rb") as f:
                 data = f.read()
 
-            # Get image dimensions from header (lazy open — no full decode yet)
-            img = Image.open(io.BytesIO(data))
-            W, H = img.size
+            # Get image dimensions
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            H, W = img.shape[:2]
 
             for cx_n, cy_n, w_n, h_n in norm_bboxes:
                 cx = cx_n * W;  cy = cy_n * H
@@ -211,8 +209,9 @@ class COCOSiameseDataset(Dataset):
         inst = self.instances[idx]
         cx, cy, w, h = inst["cx"], inst["cy"], inst["w"], inst["h"]
 
-        img_np = np.array(
-            Image.open(io.BytesIO(self.img_bytes[inst["img_name"]])).convert("RGB")
+        img_np = cv2.cvtColor(
+            cv2.imdecode(np.frombuffer(self.img_bytes[inst["img_name"]], np.uint8), cv2.IMREAD_COLOR),
+            cv2.COLOR_BGR2RGB,
         )
 
         # ---- template crop (always from the target instance) -----------
@@ -225,8 +224,9 @@ class COCOSiameseDataset(Dataset):
             while neg["img_name"] == inst["img_name"]:
                 neg = self.instances[random.randrange(len(self.instances))]
 
-            neg_img_np = np.array(
-                Image.open(io.BytesIO(self.img_bytes[neg["img_name"]])).convert("RGB")
+            neg_img_np = cv2.cvtColor(
+                cv2.imdecode(np.frombuffer(self.img_bytes[neg["img_name"]], np.uint8), cv2.IMREAD_COLOR),
+                cv2.COLOR_BGR2RGB,
             )
             _, neg_s_x  = self._get_crop_size(neg["w"], neg["h"])
             search      = _crop_and_resize(neg_img_np,
@@ -279,6 +279,6 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=8,
         drop_last=shuffle,   # only drop last for training
     )
