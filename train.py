@@ -33,7 +33,7 @@ CFG = dict(
     num_workers    = 24,
     lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
     val_split      = 0.05,   # fraction of train instances held out for val
-    save_every     = 5,
+    save_every     = 1,
     save_dir       = "checkpoints",
     plot_every     = 20,   # update livelossplot every N steps
 
