@@ -236,7 +236,8 @@ class COCOSiameseDataset(Dataset):
             search      = _crop_and_resize(neg_img_np,
                                            neg["cx"], neg["cy"],
                                            neg_s_x, self.search_size)
-            heatmap = np.zeros((self.heatmap_size, self.heatmap_size), dtype=np.float32)
+            heatmap   = np.zeros((self.heatmap_size, self.heatmap_size), dtype=np.float32)
+            gt_coords = np.zeros(2, dtype=np.float32)   # unused for negatives
 
         # ---- positive pair: jittered search from the same image --------
         else:
@@ -256,6 +257,8 @@ class COCOSiameseDataset(Dataset):
             sigma   = self._sigma_for(w, h, s_x)
             search  = _crop_and_resize(img_np, search_cx, search_cy, s_x, self.search_size)
             heatmap = _make_gaussian(hm_cx, hm_cy, self.heatmap_size, sigma)
+            gt_coords = np.array([hm_cx / self.heatmap_size,
+                                   hm_cy / self.heatmap_size], dtype=np.float32)  # normalised [0,1]
 
         # Return uint8 CHW tensors — float conversion and normalisation
         # happen as a single batched GPU op in the training loop.
@@ -265,6 +268,7 @@ class COCOSiameseDataset(Dataset):
             torch.tensor(template.transpose(2, 0, 1)),   # (3, 128, 128) uint8
             torch.tensor(search.transpose(2, 0, 1)),     # (3, 256, 256) uint8
             torch.tensor(heatmap).unsqueeze(0),          # (1,  16,  16) float32
+            torch.tensor(gt_coords),                     # (2,)           float32
         )
 
 

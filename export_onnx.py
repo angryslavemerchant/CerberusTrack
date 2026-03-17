@@ -1,25 +1,36 @@
 """
 Export CerberusSiamese to ONNX for Hailo DFC compilation.
 
-Usage
------
-# untrained weights (architecture test)
-python export_onnx.py
-
-# trained weights
-python export_onnx.py --weights cerberus.pth --output cerberus.onnx
+Edit the CFG dict below, then run:
+    %run export_onnx.py     # Jupyter
+    python export_onnx.py   # terminal
 """
 
 import argparse
+import os
 import torch
 from Cerberus_Siamese import CerberusSiamese
+
+# ── config ────────────────────────────────────────────────────────────────────
+CFG = dict(
+    snapshot      = "cerberus_epoch22.pth",  # filename inside snapshots/; set to None for random weights
+    snapshots_dir = "snapshots",
+    output        = "cerberus.onnx",
+)
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def export(weights: str | None, output: str) -> None:
     model = CerberusSiamese()
 
     if weights:
-        state = torch.load(weights, map_location="cpu")
+        ckpt = torch.load(weights, map_location="cpu")
+        # Training scripts save {"model": state_dict, "optimizer": ..., ...}
+        # Support both that format and a bare state_dict.
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+        # torch.compile() wraps keys with "_orig_mod." — strip it if present
+        if any(k.startswith("_orig_mod.") for k in state):
+            state = {k.replace("_orig_mod.", "", 1): v for k, v in state.items()}
         model.load_state_dict(state)
         print(f"Loaded weights from {weights}")
     else:
@@ -51,7 +62,6 @@ def export(weights: str | None, output: str) -> None:
 def _verify(onnx_path: str, z: torch.Tensor, x: torch.Tensor) -> None:
     try:
         import onnxruntime as ort
-        import numpy as np
 
         sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
         out  = sess.run(None, {"template": z.numpy(), "search": x.numpy()})
@@ -62,8 +72,14 @@ def _verify(onnx_path: str, z: torch.Tensor, x: torch.Tensor) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weights", default=None,          help="Path to .pth checkpoint (optional)")
-    parser.add_argument("--output",  default="cerberus.onnx", help="Output ONNX file path")
+    parser.add_argument("--snapshot", default=None, help="Filename inside snapshots/")
+    parser.add_argument("--output",   default=None, help="Output ONNX file path")
     args = parser.parse_args()
 
-    export(args.weights, args.output)
+    # CLI args override CFG; CFG is the default when running from an IDE / %run
+    snapshot = args.snapshot or CFG["snapshot"]
+    output   = args.output   or CFG["output"]
+
+    weights = os.path.join(CFG["snapshots_dir"], snapshot) if snapshot else None
+
+    export(weights, output)
