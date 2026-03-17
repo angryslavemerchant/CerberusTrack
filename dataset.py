@@ -268,10 +268,12 @@ class COCOSiameseDataset(Dataset):
 
         # Return uint8 CHW tensors — float conversion and normalisation
         # happen as a single batched GPU op in the training loop.
+        # torch.tensor() (not from_numpy) ensures PyTorch owns the storage
+        # so the default collate can resize/stack it without error.
         return (
-            torch.from_numpy(template.transpose(2, 0, 1).copy()),   # (3, 128, 128) uint8
-            torch.from_numpy(search.transpose(2, 0, 1).copy()),     # (3, 256, 256) uint8
-            torch.from_numpy(heatmap).unsqueeze(0),                  # (1,  16,  16) float32
+            torch.tensor(template.transpose(2, 0, 1)),   # (3, 128, 128) uint8
+            torch.tensor(search.transpose(2, 0, 1)),     # (3, 256, 256) uint8
+            torch.tensor(heatmap).unsqueeze(0),          # (1,  16,  16) float32
         )
 
 
