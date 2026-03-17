@@ -52,7 +52,7 @@ CFG = dict(
 
     epochs         = 50,
     batch_size     = 512,
-    num_workers    = 12,
+    num_workers    = 24,
     lr             = 1e-3,   # lower than frozen run; backbone gets lr × 0.1 = 1e-4
     val_split      = 0.05,
     save_every     = 1,
@@ -132,7 +132,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=8,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -142,7 +142,7 @@ def train(cfg):
         num_workers=cfg["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=8,
         drop_last=False,
     )
 
