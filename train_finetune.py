@@ -60,7 +60,7 @@ CFG = dict(
     plot_every     = 20,
 
     freeze_backbone = False,
-    resume          = "snapshots/cerberus_epoch11.pth",   # ← update as needed
+    resume          = "snapshots/cerberus_epoch15.pth",   # ← update as needed
     amp             = True,
     compile         = True,
 )
