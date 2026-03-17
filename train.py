@@ -34,7 +34,7 @@ CFG = dict(
     lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
     val_split      = 0.05,   # fraction of train instances held out for val
     save_every     = 1,
-    save_dir       = "checkpoints",
+    save_dir       = "snapshots",
     plot_every     = 20,   # update livelossplot every N steps
 
     freeze_backbone = True,    # set False to unfreeze on next run

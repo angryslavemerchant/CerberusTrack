@@ -33,7 +33,7 @@ CFG = dict(
     lr             = 1e-3,   # lower than frozen run; backbone gets lr × 0.1 = 1e-4
     val_split      = 0.05,
     save_every     = 1,
-    save_dir       = "checkpoints",
+    save_dir       = "snapshots",
     plot_every     = 20,
 
     freeze_backbone = False,
