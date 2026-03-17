@@ -51,31 +51,17 @@ CFG = dict(
 def weighted_bce_loss(logits, targets):
     """BCE with per-pixel floor weighting + fg/bg split for logging.
 
-    weight = targets.clamp(min=0.1) gives bg pixels a floor weight of 0.1
+    weight = targets.clamp(min=0.2) gives bg pixels a floor weight of 0.2
     so ~250 background cells don't completely swamp the foreground gradient.
     """
-    weight = targets.clamp(min=0.1)
+    weight = targets.clamp(min=0.2)
     bce    = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
     loss   = (bce * weight).mean()
 
-    fg_mask = targets > 0.1
+    fg_mask = targets > 0.2
     fg_loss = bce[fg_mask].mean()   if fg_mask.any()   else bce.new_zeros(())
     bg_loss = bce[~fg_mask].mean()  if (~fg_mask).any() else bce.new_zeros(())
     return loss, fg_loss, bg_loss
-
-
-def soft_argmax_2d(heatmap):
-    """Differentiable peak coordinate estimator. Input: (b, 1, H, W) logits.
-    Returns normalised (x, y) coordinates in [0, 1] — shape (b, 2).
-    """
-    b, _, H, W = heatmap.shape
-    weights = torch.softmax(heatmap.view(b, -1), dim=-1).view(b, H, W)
-    ys = torch.linspace(0, 1, H, device=heatmap.device)
-    xs = torch.linspace(0, 1, W, device=heatmap.device)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-    pred_y = (weights * grid_y).sum(dim=(-2, -1))
-    pred_x = (weights * grid_x).sum(dim=(-2, -1))
-    return torch.stack([pred_x, pred_y], dim=-1)  # (b, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +85,7 @@ def build_augmentations(device):
         KA.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05, p=0.8),
         KA.RandomGrayscale(p=0.1),
         KA.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.3),
+        KA.RandomMotionBlur(kernel_size=(7, 21), angle=(-45, 45), direction=(-1.0, 1.0), p=0.4),
         same_on_batch=False,
     ).to(device)
 
@@ -230,13 +217,12 @@ def train(cfg):
         window_loss    = 0.0
         window_fg_loss = 0.0
         window_bg_loss = 0.0
-        for i, (template, search, heatmap_gt, gt_coords) in enumerate(train_bar):
+        for i, (template, search, heatmap_gt, _) in enumerate(train_bar):
             # Workers return uint8 CHW tensors; convert and normalise in one
             # fused GPU pass — ~4× less data over PCIe vs float32.
             template   = template.to(device, non_blocking=True).float().div(255)
             search     = search.to(device, non_blocking=True).float().div(255)
             heatmap_gt = heatmap_gt.to(device, non_blocking=True)
-            gt_coords  = gt_coords.to(device, non_blocking=True)
 
             template = (template - norm_mean) / norm_std
             search   = (search   - norm_mean) / norm_std
@@ -245,19 +231,12 @@ def train(cfg):
                 template = aug_template(template)
                 search   = aug_search(search)
 
-            is_pos = heatmap_gt.amax(dim=(-1, -2, -3)) > 0   # (b,) bool
-
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast(device_type=device.type, enabled=cfg["amp"]):
                 pred = model(template, search)
                 bce_loss, fg_l, bg_l = weighted_bce_loss(pred, heatmap_gt)
-                if is_pos.any():
-                    pred_coords = soft_argmax_2d(pred)
-                    coord_loss  = F.l1_loss(pred_coords[is_pos], gt_coords[is_pos])
-                else:
-                    coord_loss = pred.new_zeros(())
-                loss = bce_loss + 0.1 * coord_loss
+                loss = bce_loss
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
