@@ -27,12 +27,12 @@ CFG = dict(
     val_labels_dir = "/workspace/data/coco/labels/val2017",
 
     epochs         = 50,
-    batch_size     = 512,
+    batch_size     = 1024,
     num_workers    = 24,
     lr             = 4e-3,   # scaled linearly with batch size (128 → 512 = 4×)
     save_every     = 5,
     save_dir       = "checkpoints",
-    plot_every     = 200,   # update livelossplot every N steps
+    plot_every     = 20,   # update livelossplot every N steps
 
     freeze_backbone = True,    # set False to unfreeze on next run
     resume          = None,    # e.g. "checkpoints/cerberus_epoch50.pth"
