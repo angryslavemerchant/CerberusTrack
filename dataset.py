@@ -12,10 +12,9 @@ Crop convention
   Search   : 256x256  —  2x template scale, center randomly jittered
   Heatmap  : 16x16    —  Gaussian blob at the object's projected location
 
-NOTE: __getitem__ is coord-only — no pixel ops.
-      JPEG decoding, cropping, resizing, and normalisation all happen in the
-      GPU thread via prepare_batch() in train.py.
-      Kornia augmentations (color jitter, blur, etc.) follow in the training loop.
+NOTE: Workers decode with TurboJPEG and return uint8 tensors (no normalisation).
+      Float conversion and ImageNet normalisation happen as a single batched GPU
+      op in the training loop.  Kornia augmentations follow after that.
 """
 
 import math
@@ -25,19 +24,75 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import turbojpeg as _tj
 from torch.utils.data import DataLoader, Dataset
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+
 CONTEXT_AMOUNT = 0.5   # SiamFC context padding factor
 SEARCH_SCALE   = 2.0   # search crop covers 2x the template area in image space
 
 
 # ---------------------------------------------------------------------------
+# TurboJPEG — one handle per process, created lazily so forked workers each
+# get their own independent instance.
+# ---------------------------------------------------------------------------
+_tj_handle: "_tj.TurboJPEG | None" = None
+
+def _get_tj() -> "_tj.TurboJPEG":
+    global _tj_handle
+    if _tj_handle is None:
+        _tj_handle = _tj.TurboJPEG()
+    return _tj_handle
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _make_canvas(s_int: int) -> np.ndarray:
+    """Blank canvas filled with ImageNet mean colour (uint8, H×W×3)."""
+    pad = (_IMAGENET_MEAN * 255).round().astype(np.uint8)
+    canvas = np.empty((s_int, s_int, 3), dtype=np.uint8)
+    canvas[:, :, 0] = pad[0]
+    canvas[:, :, 1] = pad[1]
+    canvas[:, :, 2] = pad[2]
+    return canvas
+
+
+def _crop_and_resize(img_np: np.ndarray, cx: float, cy: float,
+                     s: float, out_size: int) -> np.ndarray:
+    """
+    Crop a square of side s centred at (cx, cy) from img_np (H×W×3 uint8).
+    Regions outside the image boundary are filled with ImageNet mean colour.
+    Returns a uint8 numpy array resized to out_size×out_size.
+    """
+    H, W = img_np.shape[:2]
+    s_int = max(1, int(round(s)))
+    half  = s_int / 2.0
+
+    x1 = int(math.floor(cx - half))
+    y1 = int(math.floor(cy - half))
+    x2 = x1 + s_int
+    y2 = y1 + s_int
+
+    src_x1 = max(0, x1);  src_y1 = max(0, y1)
+    src_x2 = min(W, x2);  src_y2 = min(H, y2)
+
+    dst_x1 = src_x1 - x1
+    dst_y1 = src_y1 - y1
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+
+    canvas = _make_canvas(s_int)
+    canvas[dst_y1:dst_y2, dst_x1:dst_x2] = img_np[src_y1:src_y2, src_x1:src_x2]
+
+    return cv2.resize(canvas, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
+
+
 def _make_gaussian(cx: float, cy: float, size: int, sigma: float) -> np.ndarray:
     """
     size×size Gaussian heatmap with peak at (cx, cy).
@@ -47,31 +102,6 @@ def _make_gaussian(cx: float, cy: float, size: int, sigma: float) -> np.ndarray:
     ys = np.arange(size, dtype=np.float32)
     xs, ys = np.meshgrid(xs, ys)
     return np.exp(-((xs - cx) ** 2 + (ys - cy) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Collate
-# ---------------------------------------------------------------------------
-def siamese_collate_fn(batch: list) -> dict:
-    """
-    Custom collate that keeps JPEG byte tensors as a list (variable length)
-    while stacking all other fields normally.
-    """
-    return {
-        "tmpl_bytes": [item["tmpl_bytes"] for item in batch],   # list of 1-D uint8 tensors
-        "tmpl_cx": torch.tensor([item["tmpl_cx"] for item in batch], dtype=torch.float32),
-        "tmpl_cy": torch.tensor([item["tmpl_cy"] for item in batch], dtype=torch.float32),
-        "tmpl_s":  torch.tensor([item["tmpl_s"]  for item in batch], dtype=torch.float32),
-        "tmpl_H":  torch.tensor([item["tmpl_H"]  for item in batch], dtype=torch.int32),
-        "tmpl_W":  torch.tensor([item["tmpl_W"]  for item in batch], dtype=torch.int32),
-        "srch_bytes": [item["srch_bytes"] for item in batch],   # list of 1-D uint8 tensors
-        "srch_cx": torch.tensor([item["srch_cx"] for item in batch], dtype=torch.float32),
-        "srch_cy": torch.tensor([item["srch_cy"] for item in batch], dtype=torch.float32),
-        "srch_s":  torch.tensor([item["srch_s"]  for item in batch], dtype=torch.float32),
-        "srch_H":  torch.tensor([item["srch_H"]  for item in batch], dtype=torch.int32),
-        "srch_W":  torch.tensor([item["srch_W"]  for item in batch], dtype=torch.int32),
-        "heatmap": torch.stack([item["heatmap"] for item in batch]),   # (B, 1, 16, 16)
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +137,6 @@ class COCOSiameseDataset(Dataset):
         min_area: int      = 400,
         _img_bytes: dict   = None,
         _instances: list   = None,
-        _img_dims: dict    = None,
     ):
         self.template_size = template_size
         self.search_size   = search_size
@@ -120,7 +149,6 @@ class COCOSiameseDataset(Dataset):
         # Prebuilt path: reuse already-loaded data (e.g. for val split)
         if _img_bytes is not None and _instances is not None:
             self.img_bytes = _img_bytes
-            self.img_dims  = _img_dims
             self.instances = _instances
             print(f"Dataset ready: {len(self.instances):,} instances "
                   f"from {len(self.img_bytes):,} images")
@@ -146,9 +174,8 @@ class COCOSiameseDataset(Dataset):
 
         # ---- Phase 2: load images into RAM, convert to pixel coords --------
         print(f"Loading {len(raw)} images into RAM …")
-        self.img_bytes: dict[str, bytes]        = {}
-        self.img_dims:  dict[str, tuple[int,int]] = {}   # img_name -> (H, W)
-        self.instances: list[dict]              = []
+        self.img_bytes: dict[str, bytes] = {}
+        self.instances: list[dict]       = []
 
         for i, (img_name, norm_bboxes) in enumerate(raw.items()):
             img_path = images_dir / img_name
@@ -161,7 +188,6 @@ class COCOSiameseDataset(Dataset):
             # Decode once to get dimensions — pixel data is discarded
             img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
             H, W = img.shape[:2]
-            self.img_dims[img_name] = (H, W)
 
             for cx_n, cy_n, w_n, h_n in norm_bboxes:
                 cx = cx_n * W;  cy = cy_n * H
@@ -200,9 +226,13 @@ class COCOSiameseDataset(Dataset):
     def __getitem__(self, idx: int):
         inst = self.instances[idx]
         cx, cy, w, h = inst["cx"], inst["cy"], inst["w"], inst["h"]
-        H, W = self.img_dims[inst["img_name"]]
 
+        tj = _get_tj()
+        img_np = tj.decode(self.img_bytes[inst["img_name"]], pixel_format=_tj.TJPF_RGB)
+
+        # ---- template crop (always from the target instance) -----------
         s_z, s_x = self._get_crop_size(w, h)
+        template  = _crop_and_resize(img_np, cx, cy, s_z, self.template_size)
 
         # ---- negative pair: search from a different image --------------
         if random.random() < self.neg_ratio:
@@ -210,54 +240,39 @@ class COCOSiameseDataset(Dataset):
             while neg["img_name"] == inst["img_name"]:
                 neg = self.instances[random.randrange(len(self.instances))]
 
-            _, neg_s_x = self._get_crop_size(neg["w"], neg["h"])
-            neg_H, neg_W = self.img_dims[neg["img_name"]]
-
-            srch_img_name       = neg["img_name"]
-            srch_cx, srch_cy    = neg["cx"], neg["cy"]
-            srch_s              = neg_s_x
-            srch_H, srch_W      = neg_H, neg_W
+            neg_img_np  = tj.decode(self.img_bytes[neg["img_name"]], pixel_format=_tj.TJPF_RGB)
+            _, neg_s_x  = self._get_crop_size(neg["w"], neg["h"])
+            search      = _crop_and_resize(neg_img_np,
+                                           neg["cx"], neg["cy"],
+                                           neg_s_x, self.search_size)
             heatmap = np.zeros((self.heatmap_size, self.heatmap_size), dtype=np.float32)
 
         # ---- positive pair: jittered search from the same image --------
         else:
             jitter_range = self.max_jitter * s_x
-            srch_cx = cx + random.uniform(-jitter_range, jitter_range)
-            srch_cy = cy + random.uniform(-jitter_range, jitter_range)
-            srch_s  = s_x
-            srch_img_name  = inst["img_name"]
-            srch_H, srch_W = H, W
+            search_cx = cx + random.uniform(-jitter_range, jitter_range)
+            search_cy = cy + random.uniform(-jitter_range, jitter_range)
 
             scale       = self.search_size / s_x
             half_search = self.search_size / 2.0
-            obj_x = (cx - srch_cx) * scale + half_search
-            obj_y = (cy - srch_cy) * scale + half_search
+            obj_x = (cx - search_cx) * scale + half_search
+            obj_y = (cy - search_cy) * scale + half_search
 
             hm_scale = self.heatmap_size / self.search_size
             hm_cx    = obj_x * hm_scale
             hm_cy    = obj_y * hm_scale
 
             sigma   = self._sigma_for(w, h, s_x)
+            search  = _crop_and_resize(img_np, search_cx, search_cy, s_x, self.search_size)
             heatmap = _make_gaussian(hm_cx, hm_cy, self.heatmap_size, sigma)
 
-        # np.frombuffer returns a read-only view; .copy() makes it writeable
-        # so torch.from_numpy can take ownership without raising.
-        tmpl_bytes = torch.from_numpy(
-            np.frombuffer(self.img_bytes[inst["img_name"]], dtype=np.uint8).copy()
+        # Return uint8 CHW tensors — float conversion and normalisation
+        # happen as a single batched GPU op in the training loop.
+        return (
+            torch.from_numpy(template.transpose(2, 0, 1).copy()),   # (3, 128, 128) uint8
+            torch.from_numpy(search.transpose(2, 0, 1).copy()),     # (3, 256, 256) uint8
+            torch.from_numpy(heatmap).unsqueeze(0),                  # (1,  16,  16) float32
         )
-        srch_bytes = torch.from_numpy(
-            np.frombuffer(self.img_bytes[srch_img_name], dtype=np.uint8).copy()
-        )
-
-        return {
-            "tmpl_bytes": tmpl_bytes,          # 1-D uint8 CPU tensor (variable length)
-            "tmpl_cx": cx,  "tmpl_cy": cy,  "tmpl_s": s_z,
-            "tmpl_H":  H,   "tmpl_W":  W,
-            "srch_bytes": srch_bytes,          # 1-D uint8 CPU tensor (variable length)
-            "srch_cx": srch_cx, "srch_cy": srch_cy, "srch_s": srch_s,
-            "srch_H":  srch_H,  "srch_W":  srch_W,
-            "heatmap": torch.from_numpy(heatmap).unsqueeze(0),   # (1, 16, 16)
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -281,5 +296,4 @@ def build_dataloader(
         persistent_workers=True,
         prefetch_factor=4,
         drop_last=shuffle,
-        collate_fn=siamese_collate_fn,
     )
