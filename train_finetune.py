@@ -25,7 +25,7 @@ from dataset import COCOSiameseDataset
 # ---------------------------------------------------------------------------
 CFG = dict(
     images_dir     = "/workspace/data/coco/images/train2017",
-    labels_dir     = "/workspace/data/coco/labels/train2017",
+    labels_dir     = "/workspace/data/coco/coco/train2017",
 
     epochs         = 50,
     batch_size     = 512,

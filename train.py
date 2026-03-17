@@ -24,7 +24,7 @@ from dataset import COCOSiameseDataset
 # ---------------------------------------------------------------------------
 CFG = dict(
     images_dir     = "/workspace/data/coco/images/train2017",
-    labels_dir     = "/workspace/data/coco/labels/train2017",
+    labels_dir     = "/workspace/data/coco/coco/train2017",
     val_images_dir = "/workspace/data/coco/images/val2017",
     val_labels_dir = "/workspace/data/coco/labels/val2017",
 
