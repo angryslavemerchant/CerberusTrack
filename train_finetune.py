@@ -53,7 +53,7 @@ CFG = dict(
     epochs         = 50,
     batch_size     = 512,
     num_workers    = 24,
-    lr             = 1e-3,   # lower than frozen run; backbone gets lr × 0.1 = 1e-4
+    lr             = 5e-4,   # lower than frozen run; backbone gets lr × 0.1 = 5e-5
     val_split      = 0.05,
     save_every     = 1,
     save_dir       = "snapshots",
@@ -233,7 +233,7 @@ def train(cfg):
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             scaler.step(optimizer)
             scaler.update()
 

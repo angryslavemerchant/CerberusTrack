@@ -13,9 +13,9 @@ from Cerberus_Siamese import CerberusSiamese
 
 # ── config ────────────────────────────────────────────────────────────────────
 CFG = dict(
-    snapshot      = "cerberus_epoch22.pth",  # filename inside snapshots/; set to None for random weights
+    snapshot      = "cerberus_epoch17.pth",  # filename inside snapshots/; set to None for random weights
     snapshots_dir = "snapshots",
-    output        = "cerberus.onnx",
+    output        = "cerberus_core.onnx",
 )
 # ──────────────────────────────────────────────────────────────────────────────
 
